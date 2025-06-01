@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Search, Clock, Youtube, Key, AlertTriangle, ListMusic, Loader2, Timer, Play, Pause, SkipForward, Save, Trash2, PanelLeftOpen, PanelLeftClose, XCircle } from 'lucide-react';
+import { Search, Clock, Youtube, Key, AlertTriangle, ListMusic, Loader2, Timer, Play, Pause, SkipForward, Save, Trash2, PanelLeftOpen, PanelLeftClose, XCircle, ArrowDownAZ, ArrowUpAZ, ListOrdered, Clock2 } from 'lucide-react';
 import './App.css';
 
 // IndexedDB関連のインポートと設定
@@ -14,13 +14,13 @@ const LOCAL_STORAGE_KEY_API_KEY = 'musicPlaylister_youtubeApiKey';
 // Helper function to parse ISO 8601 duration
 const parseISO8601Duration = (durationString) => {
     if (!durationString) return 0;
-    const regex = /PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?S))?/; // Allow fractional seconds
+    const regex = /PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?S))?/; 
     const matches = durationString.match(regex);
     if (!matches) return 0;
     const hours = parseInt(matches[1] || '0');
     const minutes = parseInt(matches[2] || '0');
-    const seconds = parseFloat(matches[3]?.replace('S', '') || '0'); // Parse float and remove 'S'
-    return hours * 3600 + minutes * 60 + Math.floor(seconds); // Floor seconds for consistency
+    const seconds = parseFloat(matches[3]?.replace('S', '') || '0'); 
+    return hours * 3600 + minutes * 60 + Math.floor(seconds); 
 };
 
 // Helper function to format seconds
@@ -44,7 +44,8 @@ const initDB = async () => {
         upgrade(db) {
             if (!db.objectStoreNames.contains(STORE_NAME_PLAYLISTS)) {
                 const store = db.createObjectStore(STORE_NAME_PLAYLISTS, { keyPath: 'id' });
-                store.createIndex('createdAt', 'createdAt'); // ソート用にインデックス作成
+                store.createIndex('createdAt', 'createdAt'); 
+                store.createIndex('name', 'name'); // 名前でのソート用インデックス
             }
         },
     });
@@ -84,6 +85,11 @@ const App = () => {
     const [playlistName, setPlaylistName] = useState('');
     const [showSaveModal, setShowSaveModal] = useState(false);
 
+    // Sort state for saved playlists
+    const [sortCriteria, setSortCriteria] = useState('createdAt'); 
+    const [sortOrder, setSortOrder] = useState('desc'); 
+
+
     const currentPlayingInfoRef = useRef(currentPlayingInfo);
     useEffect(() => { currentPlayingInfoRef.current = currentPlayingInfo; }, [currentPlayingInfo]);
 
@@ -111,28 +117,46 @@ const App = () => {
         }
     }, []);
     
-    // Load saved playlists from IndexedDB on initial load or when dbPromise changes
+    // Load and sort saved playlists from IndexedDB
+    const loadAndSortPlaylists = useCallback(async () => {
+        if (!dbPromise) return;
+        try {
+            const db = await dbPromise;
+            const tx = db.transaction(STORE_NAME_PLAYLISTS, 'readonly');
+            const store = tx.objectStore(STORE_NAME_PLAYLISTS);
+            let allPlaylists = await store.getAll();
+            
+            allPlaylists = allPlaylists.map(p => ({
+                ...p,
+                createdAt: new Date(p.createdAt),
+                videoCount: p.videos?.length || 0,
+            }));
+
+            allPlaylists.sort((a, b) => {
+                let comparison = 0;
+                if (sortCriteria === 'name') {
+                    comparison = a.name.localeCompare(b.name, 'ja');
+                } else if (sortCriteria === 'createdAt') {
+                    comparison = b.createdAt.getTime() - a.createdAt.getTime(); 
+                } else if (sortCriteria === 'videoCount') {
+                    comparison = a.videoCount - b.videoCount;
+                } else if (sortCriteria === 'totalDuration') {
+                    comparison = a.totalDuration - b.totalDuration;
+                }
+
+                return sortOrder === 'asc' ? comparison : -comparison;
+            });
+            
+            setSavedPlaylists(allPlaylists);
+        } catch (e) {
+            console.error("Error loading or sorting playlists from IndexedDB:", e);
+            setError("保存済みプレイリストの読み込みまたはソートに失敗しました。");
+        }
+    }, [dbPromise, sortCriteria, sortOrder]);
+
     useEffect(() => {
-        const loadPlaylists = async () => {
-            if (!dbPromise) return;
-            try {
-                const db = await dbPromise;
-                const tx = db.transaction(STORE_NAME_PLAYLISTS, 'readonly');
-                const store = tx.objectStore(STORE_NAME_PLAYLISTS);
-                const allPlaylists = await store.getAll();
-                // createdAtはISO文字列で保存されている想定なのでDateオブジェクトに変換してソート
-                const playlistsWithDates = allPlaylists.map(p => ({
-                    ...p,
-                    createdAt: new Date(p.createdAt) 
-                }));
-                setSavedPlaylists(playlistsWithDates.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime()));
-            } catch (e) {
-                console.error("Error loading playlists from IndexedDB:", e);
-                setError("保存済みプレイリストの読み込みに失敗しました。");
-            }
-        };
-        loadPlaylists();
-    }, [dbPromise]);
+        loadAndSortPlaylists();
+    }, [loadAndSortPlaylists]);
 
 
     // Load YouTube Iframe API
@@ -142,7 +166,7 @@ const App = () => {
             return;
         }
         const tag = document.createElement('script');
-        tag.src = "https://www.youtube.com/iframe_api"; // Correct API URL
+        tag.src = "https://www.youtube.com/iframe_api"; 
         const firstScriptTag = document.getElementsByTagName('script')[0];
         if (firstScriptTag && firstScriptTag.parentNode) {
             firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
@@ -504,8 +528,9 @@ const App = () => {
             totalDuration: playlistTotalDuration,
             targetDuration: travelTimeInfo?.seconds || 0,
             keywords: musicKeywords,
-            createdAt: new Date().toISOString(), // ISO文字列で保存
+            createdAt: new Date().toISOString(), 
             originalTargetText: travelTimeInfo?.text || '',
+            // theme: suggestedTheme || '', // Gemini API 関連のテーマは削除
         };
 
         try {
@@ -515,18 +540,13 @@ const App = () => {
             await store.put(newPlaylistData);
             await tx.done;
             
-            // Update local state
-            const updatedPlaylists = currentPlaylistId 
-                ? savedPlaylists.map(p => p.id === currentPlaylistId ? { ...newPlaylistData, createdAt: new Date(newPlaylistData.createdAt) } : p)
-                : [...savedPlaylists, { ...newPlaylistData, createdAt: new Date(newPlaylistData.createdAt) }];
+            await loadAndSortPlaylists(); 
             
-            setSavedPlaylists(updatedPlaylists.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime()));
             if (!currentPlaylistId) {
                 setCurrentPlaylistId(newPlaylistData.id);
             }
             
             setShowSaveModal(false);
-            setPlaylistName(''); 
             setError(''); 
         } catch (e) {
             console.error("Error saving playlist to IndexedDB: ", e);
@@ -546,6 +566,7 @@ const App = () => {
             seconds: playlistToLoad.targetDuration,
         });
         setCurrentPlaylistId(playlistToLoad.id); 
+        // setSuggestedTheme(playlistToLoad.theme || ''); // Gemini API 関連のテーマは削除
         setCurrentPlayingInfo(null); 
         destroyPlayer();
         setShowSavedPlaylistsPanel(false); 
@@ -557,7 +578,6 @@ const App = () => {
             setError("データベース接続が初期化されていません。");
             return;
         }
-        // カスタム確認モーダルを実装するまでは window.confirm を使用
         if (!window.confirm("このプレイリストを削除してもよろしいですか？この操作は元に戻せません。")) {
             return;
         }
@@ -571,8 +591,7 @@ const App = () => {
             await store.delete(playlistIdToDelete);
             await tx.done;
             
-            const updatedPlaylists = savedPlaylists.filter(p => p.id !== playlistIdToDelete);
-            setSavedPlaylists(updatedPlaylists.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()));
+            await loadAndSortPlaylists(); 
             
             console.log("Playlist deleted with ID: ", playlistIdToDelete);
             if (currentPlaylistId === playlistIdToDelete) {
@@ -581,6 +600,7 @@ const App = () => {
                 setPlaylistTotalDuration(0);
                 setTravelTimeInfo(null);
                 setMusicKeywords('');
+                // setSuggestedTheme(''); // Gemini API 関連のテーマは削除
             }
         } catch (e) {
             console.error("Error deleting playlist from IndexedDB: ", e);
@@ -588,6 +608,16 @@ const App = () => {
         } finally {
             setIsLoading(false);
             setLoadingMessage('');
+        }
+    };
+
+    const handleSortChange = (criteria) => {
+        if (sortCriteria === criteria) {
+            setSortOrder(prevOrder => prevOrder === 'asc' ? 'desc' : 'asc');
+        } else {
+            setSortCriteria(criteria);
+            setSortOrder('asc'); 
+            if (criteria === 'createdAt') setSortOrder('desc');
         }
     };
 
@@ -648,6 +678,7 @@ const App = () => {
                         placeholder="プレイリスト名を入力"
                     />
                 </div>
+                {/* Gemini API 関連のテーマ表示は削除 */}
                 {error && showSaveModal && <p className="text-red-500 text-sm mb-4">{error}</p>}
                 <div className="flex space-x-2">
                     <button
@@ -669,13 +700,34 @@ const App = () => {
         </div>
     );
 
+    const renderSortButton = (criteria, label, Icon) => {
+        const isActive = sortCriteria === criteria;
+        const currentOrderIcon = isActive && sortOrder === 'asc' ? <ArrowUpAZ size={14} className="ml-1"/> : <ArrowDownAZ size={14} className="ml-1"/>;
+        return (
+            <button
+                onClick={() => handleSortChange(criteria)}
+                className={`flex items-center text-xs px-2 py-1 rounded-md transition-colors
+                            ${isActive ? 'bg-blue-500 text-white' : 'bg-slate-600 hover:bg-slate-500 text-gray-300'}`}
+                title={`Sort by ${label} (${isActive ? (sortOrder === 'asc' ? 'ascending' : 'descending') : 'ascending'})`}
+            >
+                <Icon size={14} className="mr-1" /> {label} {isActive && currentOrderIcon}
+            </button>
+        );
+    };
+
     const renderSavedPlaylistsPanel = () => (
         <div className={`fixed top-0 ${showSavedPlaylistsPanel ? 'left-0' : '-left-full sm:-left-80'} w-full sm:w-80 h-full bg-slate-800 shadow-xl z-40 transition-all duration-300 ease-in-out p-4 flex flex-col`}>
-            <div className="flex justify-between items-center mb-4">
+            <div className="flex justify-between items-center mb-2">
                 <h2 className="text-xl font-semibold text-blue-300">保存済みリスト</h2>
                 <button onClick={() => setShowSavedPlaylistsPanel(false)} className="text-gray-400 hover:text-white">
                     <PanelLeftClose size={24} />
                 </button>
+            </div>
+            <div className="flex space-x-1 mb-3 overflow-x-auto pb-1">
+                {renderSortButton('createdAt', '作成日', Clock2)}
+                {renderSortButton('name', '名前', ArrowDownAZ)}
+                {renderSortButton('videoCount', '曲数', ListOrdered)}
+                {renderSortButton('totalDuration', '再生時間', Timer)}
             </div>
             {savedPlaylists.length === 0 && (
                 <p className="text-gray-400 text-sm">保存されたプレイリストはありません。</p>
@@ -685,14 +737,15 @@ const App = () => {
                     <li key={p.id} className="p-3 bg-slate-700 rounded-md hover:bg-slate-600/70 transition-colors group">
                         <div className="flex justify-between items-start">
                             <div>
-                                <button onClick={() => handleLoadPlaylist(p)} className="text-sm font-medium text-blue-300 hover:text-blue-200 text-left">
+                                <button onClick={() => handleLoadPlaylist(p)} className="text-sm font-medium text-blue-300 hover:text-blue-200 text-left block">
                                     {p.name}
                                 </button>
+                                {/* p.theme の表示は削除 */}
                                 <p className="text-xs text-gray-400">
-                                    {p.videos?.length || 0}曲 / {formatDuration(p.totalDuration)}
+                                    {p.videoCount}曲 / {formatDuration(p.totalDuration)}
                                 </p>
                                 <p className="text-xs text-gray-500">
-                                    作成日: {new Date(p.createdAt).toLocaleDateString()}
+                                    作成日: {p.createdAt.toLocaleDateString()}
                                 </p>
                             </div>
                             <button 
@@ -781,7 +834,10 @@ const App = () => {
                                 </div>
                             </div>
                             <div>
-                                <label htmlFor="musicKeywords" className="block text-sm font-medium text-gray-300 mb-1">音楽キーワード</label>
+                                <div className="flex justify-between items-center mb-1">
+                                    <label htmlFor="musicKeywords" className="block text-sm font-medium text-gray-300">音楽キーワード</label>
+                                    {/* Gemini API 関連キーワード提案ボタンは削除 */}
+                                </div>
                                 <input
                                     type="text"
                                     id="musicKeywords"
@@ -790,6 +846,7 @@ const App = () => {
                                     className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 placeholder-gray-500"
                                     placeholder="例: J-POP, 好きなアーティスト名, 作業用BGM"
                                 />
+                                {/* Gemini API 関連キーワード表示は削除 */}
                             </div>
                             <button
                                 onClick={handleGeneratePlaylist}
@@ -802,6 +859,7 @@ const App = () => {
                         </div>
                     </section>
 
+                    {/* Gemini API エラー表示は削除 */}
                     {error && !isLoading && (
                         <div className="bg-red-700 bg-opacity-80 p-4 rounded-lg shadow-md flex items-start">
                             <AlertTriangle size={24} className="text-red-300 mr-3 flex-shrink-0" />
@@ -823,6 +881,7 @@ const App = () => {
                             <div className="flex justify-between items-center mb-4">
                                 <h2 className="text-xl font-semibold text-green-300 flex items-center"><Youtube size={20} className="mr-2"/>生成結果</h2>
                                 <div className="flex items-center space-x-2">
+                                    {/* Gemini API テーマ提案ボタンは削除 */}
                                     {generatedPlaylist.length > 0 && ( 
                                         <button
                                             onClick={handleOpenSaveModal}
@@ -853,6 +912,7 @@ const App = () => {
                                     )}
                                 </div>
                             </div>
+                            {/* Gemini API テーマ表示は削除 */}
                             {travelTimeInfo && (
                                 <div className="mb-4 p-3 bg-slate-700 rounded-md">
                                     <p className="text-sm text-gray-300 flex items-center">
