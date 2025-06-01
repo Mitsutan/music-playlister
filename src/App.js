@@ -1,17 +1,26 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Search, Clock, Youtube, Key, AlertTriangle, ListMusic, Loader2, Timer, Play, Pause, SkipForward } from 'lucide-react'; // Removed ExternalLink
+import { Search, Clock, Youtube, Key, AlertTriangle, ListMusic, Loader2, Timer, Play, Pause, SkipForward, Save, Trash2, PanelLeftOpen, PanelLeftClose, XCircle } from 'lucide-react';
 import './App.css';
+
+// IndexedDB関連のインポートと設定
+import { openDB } from 'idb';
+
+const DB_NAME = 'MusicPlaylisterDB';
+const DB_VERSION = 1;
+const STORE_NAME_PLAYLISTS = 'playlists';
+const LOCAL_STORAGE_KEY_API_KEY = 'musicPlaylister_youtubeApiKey';
+
 
 // Helper function to parse ISO 8601 duration
 const parseISO8601Duration = (durationString) => {
     if (!durationString) return 0;
-    const regex = /PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/;
+    const regex = /PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?S))?/; // Allow fractional seconds
     const matches = durationString.match(regex);
     if (!matches) return 0;
     const hours = parseInt(matches[1] || '0');
     const minutes = parseInt(matches[2] || '0');
-    const seconds = parseInt(matches[3] || '0');
-    return hours * 3600 + minutes * 60 + seconds;
+    const seconds = parseFloat(matches[3]?.replace('S', '') || '0'); // Parse float and remove 'S'
+    return hours * 3600 + minutes * 60 + Math.floor(seconds); // Floor seconds for consistency
 };
 
 // Helper function to format seconds
@@ -29,8 +38,24 @@ const formatDuration = (totalSeconds) => {
     return `${paddedMinutes}:${paddedSeconds}`;
 };
 
+// IndexedDBを開く関数
+const initDB = async () => {
+    const db = await openDB(DB_NAME, DB_VERSION, {
+        upgrade(db) {
+            if (!db.objectStoreNames.contains(STORE_NAME_PLAYLISTS)) {
+                const store = db.createObjectStore(STORE_NAME_PLAYLISTS, { keyPath: 'id' });
+                store.createIndex('createdAt', 'createdAt'); // ソート用にインデックス作成
+            }
+        },
+    });
+    return db;
+};
+
+
 // Main App Component
 const App = () => {
+    const [dbPromise, setDbPromise] = useState(null);
+
     const [youtubeApiKey, setYoutubeApiKey] = useState('');
     const [isApiKeySet, setIsApiKeySet] = useState(false);
     const [tempYoutubeApiKey, setTempYoutubeApiKey] = useState('');
@@ -42,6 +67,7 @@ const App = () => {
     const [travelTimeInfo, setTravelTimeInfo] = useState(null);
     const [generatedPlaylist, setGeneratedPlaylist] = useState([]);
     const [playlistTotalDuration, setPlaylistTotalDuration] = useState(0);
+    const [currentPlaylistId, setCurrentPlaylistId] = useState(null); 
 
     const [isLoading, setIsLoading] = useState(false);
     const [loadingMessage, setLoadingMessage] = useState('');
@@ -50,10 +76,14 @@ const App = () => {
 
     const [youtubeApiReady, setYoutubeApiReady] = useState(false);
     const playerRef = useRef(null);
-    const [currentPlayingInfo, setCurrentPlayingInfo] = useState(null); // { video, index }
+    const [currentPlayingInfo, setCurrentPlayingInfo] = useState(null); 
     const [isPlaying, setIsPlaying] = useState(false);
 
-    // Refs for state/props needed in callbacks that might be stale otherwise
+    const [savedPlaylists, setSavedPlaylists] = useState([]);
+    const [showSavedPlaylistsPanel, setShowSavedPlaylistsPanel] = useState(false);
+    const [playlistName, setPlaylistName] = useState('');
+    const [showSaveModal, setShowSaveModal] = useState(false);
+
     const currentPlayingInfoRef = useRef(currentPlayingInfo);
     useEffect(() => { currentPlayingInfoRef.current = currentPlayingInfo; }, [currentPlayingInfo]);
 
@@ -63,6 +93,47 @@ const App = () => {
     const isPlayingRef = useRef(isPlaying);
     useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
 
+    // Initialize IndexedDB
+    useEffect(() => {
+        setDbPromise(initDB());
+    }, []);
+    
+    // Load API Key from local storage on initial load
+    useEffect(() => {
+        const storedApiKey = localStorage.getItem(LOCAL_STORAGE_KEY_API_KEY);
+        if (storedApiKey) {
+            setYoutubeApiKey(storedApiKey);
+            setTempYoutubeApiKey(storedApiKey);
+            setIsApiKeySet(true);
+            setShowApiKeyModal(false);
+        } else {
+            setShowApiKeyModal(true);
+        }
+    }, []);
+    
+    // Load saved playlists from IndexedDB on initial load or when dbPromise changes
+    useEffect(() => {
+        const loadPlaylists = async () => {
+            if (!dbPromise) return;
+            try {
+                const db = await dbPromise;
+                const tx = db.transaction(STORE_NAME_PLAYLISTS, 'readonly');
+                const store = tx.objectStore(STORE_NAME_PLAYLISTS);
+                const allPlaylists = await store.getAll();
+                // createdAtはISO文字列で保存されている想定なのでDateオブジェクトに変換してソート
+                const playlistsWithDates = allPlaylists.map(p => ({
+                    ...p,
+                    createdAt: new Date(p.createdAt) 
+                }));
+                setSavedPlaylists(playlistsWithDates.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime()));
+            } catch (e) {
+                console.error("Error loading playlists from IndexedDB:", e);
+                setError("保存済みプレイリストの読み込みに失敗しました。");
+            }
+        };
+        loadPlaylists();
+    }, [dbPromise]);
+
 
     // Load YouTube Iframe API
     useEffect(() => {
@@ -71,7 +142,7 @@ const App = () => {
             return;
         }
         const tag = document.createElement('script');
-        tag.src = "https://www.youtube.com/iframe_api";
+        tag.src = "https://www.youtube.com/iframe_api"; // Correct API URL
         const firstScriptTag = document.getElementsByTagName('script')[0];
         if (firstScriptTag && firstScriptTag.parentNode) {
             firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
@@ -94,6 +165,12 @@ const App = () => {
         setIsApiKeySet(true);
         setShowApiKeyModal(false);
         setError('');
+        try {
+            localStorage.setItem(LOCAL_STORAGE_KEY_API_KEY, tempYoutubeApiKey);
+        } catch (e) {
+            console.error("Error saving API key to local storage:", e);
+            setError("APIキーの保存に失敗しました。");
+        }
     };
     
     const fetchYoutubeVideos = useCallback(async (keywords) => {
@@ -143,6 +220,9 @@ const App = () => {
             console.error("YouTube APIエラー:", err);
             setError(`YouTubeからの楽曲取得に失敗しました: ${err.message}。APIキーのクォータや権限を確認してください。`);
             return [];
+        }  finally {
+            setIsLoading(false);
+            setLoadingMessage('');
         }
     }, [youtubeApiKey]);
 
@@ -173,7 +253,7 @@ const App = () => {
                 bestPlaylistOverall = currentPlaylist;
             }
 
-            if (bestDurationOverall === targetDurationInSeconds) {
+            if (Math.abs(bestDurationOverall - targetDurationInSeconds) < 60 ) { 
                 break;
             }
         }
@@ -194,6 +274,7 @@ const App = () => {
 
     const handleGeneratePlaylist = async () => {
         setCurrentPlayingInfo(null); 
+        setCurrentPlaylistId(null); 
         await new Promise(resolve => setTimeout(resolve, 0));
 
 
@@ -384,6 +465,132 @@ const App = () => {
         }
     };
 
+    const handleOpenSaveModal = () => {
+        if (generatedPlaylist.length === 0) {
+            setError("保存するプレイリストがありません。");
+            return;
+        }
+        const defaultName = musicKeywords && travelTimeInfo 
+            ? `${musicKeywords} (${travelTimeInfo.text})` 
+            : `プレイリスト ${new Date().toLocaleString()}`;
+        
+        const loadedPlaylist = savedPlaylists.find(p => p.id === currentPlaylistId);
+        setPlaylistName(loadedPlaylist ? loadedPlaylist.name : defaultName);
+        setShowSaveModal(true);
+    };
+
+    const handleSavePlaylist = async () => {
+        if (!dbPromise) {
+            setError("データベース接続が初期化されていません。");
+            return;
+        }
+        if (generatedPlaylist.length === 0) {
+            setError("保存するプレイリストがありません。");
+            setShowSaveModal(false);
+            return;
+        }
+        if (!playlistName.trim()) {
+            setError("プレイリスト名を入力してください。");
+            return;
+        }
+
+        setIsLoading(true);
+        setLoadingMessage("プレイリストを保存中...");
+
+        const newPlaylistData = {
+            id: currentPlaylistId || Date.now().toString(), 
+            name: playlistName.trim(),
+            videos: generatedPlaylist,
+            totalDuration: playlistTotalDuration,
+            targetDuration: travelTimeInfo?.seconds || 0,
+            keywords: musicKeywords,
+            createdAt: new Date().toISOString(), // ISO文字列で保存
+            originalTargetText: travelTimeInfo?.text || '',
+        };
+
+        try {
+            const db = await dbPromise;
+            const tx = db.transaction(STORE_NAME_PLAYLISTS, 'readwrite');
+            const store = tx.objectStore(STORE_NAME_PLAYLISTS);
+            await store.put(newPlaylistData);
+            await tx.done;
+            
+            // Update local state
+            const updatedPlaylists = currentPlaylistId 
+                ? savedPlaylists.map(p => p.id === currentPlaylistId ? { ...newPlaylistData, createdAt: new Date(newPlaylistData.createdAt) } : p)
+                : [...savedPlaylists, { ...newPlaylistData, createdAt: new Date(newPlaylistData.createdAt) }];
+            
+            setSavedPlaylists(updatedPlaylists.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime()));
+            if (!currentPlaylistId) {
+                setCurrentPlaylistId(newPlaylistData.id);
+            }
+            
+            setShowSaveModal(false);
+            setPlaylistName(''); 
+            setError(''); 
+        } catch (e) {
+            console.error("Error saving playlist to IndexedDB: ", e);
+            setError(`プレイリストの保存に失敗しました: ${e.message}`);
+        } finally {
+            setIsLoading(false);
+            setLoadingMessage('');
+        }
+    };
+    
+    const handleLoadPlaylist = (playlistToLoad) => {
+        setGeneratedPlaylist(playlistToLoad.videos);
+        setPlaylistTotalDuration(playlistToLoad.totalDuration);
+        setMusicKeywords(playlistToLoad.keywords || '');
+        setTravelTimeInfo({
+            text: playlistToLoad.originalTargetText || formatDuration(playlistToLoad.targetDuration),
+            seconds: playlistToLoad.targetDuration,
+        });
+        setCurrentPlaylistId(playlistToLoad.id); 
+        setCurrentPlayingInfo(null); 
+        destroyPlayer();
+        setShowSavedPlaylistsPanel(false); 
+        setError('');
+    };
+
+    const handleDeletePlaylist = async (playlistIdToDelete) => {
+        if (!dbPromise) {
+            setError("データベース接続が初期化されていません。");
+            return;
+        }
+        // カスタム確認モーダルを実装するまでは window.confirm を使用
+        if (!window.confirm("このプレイリストを削除してもよろしいですか？この操作は元に戻せません。")) {
+            return;
+        }
+
+        setIsLoading(true);
+        setLoadingMessage("プレイリストを削除中...");
+        try {
+            const db = await dbPromise;
+            const tx = db.transaction(STORE_NAME_PLAYLISTS, 'readwrite');
+            const store = tx.objectStore(STORE_NAME_PLAYLISTS);
+            await store.delete(playlistIdToDelete);
+            await tx.done;
+            
+            const updatedPlaylists = savedPlaylists.filter(p => p.id !== playlistIdToDelete);
+            setSavedPlaylists(updatedPlaylists.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()));
+            
+            console.log("Playlist deleted with ID: ", playlistIdToDelete);
+            if (currentPlaylistId === playlistIdToDelete) {
+                setCurrentPlaylistId(null); 
+                setGeneratedPlaylist([]);
+                setPlaylistTotalDuration(0);
+                setTravelTimeInfo(null);
+                setMusicKeywords('');
+            }
+        } catch (e) {
+            console.error("Error deleting playlist from IndexedDB: ", e);
+            setError(`プレイリストの削除に失敗しました: ${e.message}`);
+        } finally {
+            setIsLoading(false);
+            setLoadingMessage('');
+        }
+    };
+
 
     const renderApiKeyModal = () => (
         <div className="fixed inset-0 bg-gray-800 bg-opacity-75 flex items-center justify-center z-50 p-4">
@@ -394,13 +601,13 @@ const App = () => {
                 </div>
                 <p className="text-sm text-gray-600 mb-4">
                     このアプリを使用するには、YouTube Data API v3キーが必要です。
-                    このキーはブラウザに保存されず、このセッションでのみ使用されます。
+                    このキーはブラウザのローカルストレージに保存されます。
                 </p>
                 <div className="mb-6">
-                    <label htmlFor="youtubeApiKey" className="block text-sm font-medium text-gray-700 mb-1">YouTube Data APIキー</label>
+                    <label htmlFor="youtubeApiKeyInput" className="block text-sm font-medium text-gray-700 mb-1">YouTube Data APIキー</label>
                     <input
                         type="password"
-                        id="youtubeApiKey"
+                        id="youtubeApiKeyInput"
                         value={tempYoutubeApiKey}
                         onChange={(e) => setTempYoutubeApiKey(e.target.value)}
                         className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500"
@@ -415,17 +622,110 @@ const App = () => {
                     <Key size={18} className="mr-2"/> キーを設定して開始
                 </button>
                  <p className="text-xs text-gray-500 mt-4">
-                    <AlertTriangle size={14} className="inline mr-1" /> APIキーは外部に送信されませんが、クライアントサイドで処理されるため、開発者ツールなどで確認可能です。公共のコンピュータでの使用は推奨しません。
+                    <AlertTriangle size={14} className="inline mr-1" /> APIキーはローカルストレージに保存されます。公共のコンピュータでの使用は推奨しません。
                 </p>
             </div>
         </div>
     );
 
-    return (
-        <div className="min-h-screen bg-gradient-to-br from-slate-900 to-slate-800 text-gray-100 font-sans p-4 sm:p-6 flex flex-col items-center">
-            {showApiKeyModal && renderApiKeyModal()}
+    const renderSavePlaylistModal = () => (
+        <div className="fixed inset-0 bg-gray-800 bg-opacity-75 flex items-center justify-center z-50 p-4">
+            <div className="bg-white p-6 sm:p-8 rounded-lg shadow-xl w-full max-w-md text-gray-800">
+                <div className="flex items-center justify-between mb-4">
+                    <h2 className="text-xl sm:text-2xl font-semibold">プレイリストを保存</h2>
+                    <button onClick={() => setShowSaveModal(false)} className="text-gray-500 hover:text-gray-700">
+                        <XCircle size={24} />
+                    </button>
+                </div>
+                <div className="mb-4">
+                    <label htmlFor="playlistName" className="block text-sm font-medium text-gray-700 mb-1">プレイリスト名</label>
+                    <input
+                        type="text"
+                        id="playlistName"
+                        value={playlistName}
+                        onChange={(e) => setPlaylistName(e.target.value)}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500"
+                        placeholder="プレイリスト名を入力"
+                    />
+                </div>
+                {error && showSaveModal && <p className="text-red-500 text-sm mb-4">{error}</p>}
+                <div className="flex space-x-2">
+                    <button
+                        onClick={handleSavePlaylist}
+                        disabled={isLoading}
+                        className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-4 rounded-md shadow-md transition duration-150 flex items-center justify-center disabled:opacity-50"
+                    >
+                        {isLoading ? <Loader2 size={18} className="animate-spin mr-2"/> : <Save size={18} className="mr-2"/>}
+                        {currentPlaylistId && savedPlaylists.some(p => p.id === currentPlaylistId) ? '更新' : '保存'}
+                    </button>
+                    <button
+                        onClick={() => setShowSaveModal(false)}
+                        className="flex-1 bg-gray-300 hover:bg-gray-400 text-gray-800 font-semibold py-2 px-4 rounded-md shadow-md transition duration-150"
+                    >
+                        キャンセル
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
 
-            <header className="w-full max-w-3xl mb-6 text-center">
+    const renderSavedPlaylistsPanel = () => (
+        <div className={`fixed top-0 ${showSavedPlaylistsPanel ? 'left-0' : '-left-full sm:-left-80'} w-full sm:w-80 h-full bg-slate-800 shadow-xl z-40 transition-all duration-300 ease-in-out p-4 flex flex-col`}>
+            <div className="flex justify-between items-center mb-4">
+                <h2 className="text-xl font-semibold text-blue-300">保存済みリスト</h2>
+                <button onClick={() => setShowSavedPlaylistsPanel(false)} className="text-gray-400 hover:text-white">
+                    <PanelLeftClose size={24} />
+                </button>
+            </div>
+            {savedPlaylists.length === 0 && (
+                <p className="text-gray-400 text-sm">保存されたプレイリストはありません。</p>
+            )}
+            <ul className="space-y-2 overflow-y-auto flex-grow">
+                {savedPlaylists.map(p => (
+                    <li key={p.id} className="p-3 bg-slate-700 rounded-md hover:bg-slate-600/70 transition-colors group">
+                        <div className="flex justify-between items-start">
+                            <div>
+                                <button onClick={() => handleLoadPlaylist(p)} className="text-sm font-medium text-blue-300 hover:text-blue-200 text-left">
+                                    {p.name}
+                                </button>
+                                <p className="text-xs text-gray-400">
+                                    {p.videos?.length || 0}曲 / {formatDuration(p.totalDuration)}
+                                </p>
+                                <p className="text-xs text-gray-500">
+                                    作成日: {new Date(p.createdAt).toLocaleDateString()}
+                                </p>
+                            </div>
+                            <button 
+                                onClick={() => handleDeletePlaylist(p.id)} 
+                                className="text-red-500 hover:text-red-400 opacity-50 group-hover:opacity-100 transition-opacity p-1"
+                                title="削除"
+                            >
+                                <Trash2 size={16} />
+                            </button>
+                        </div>
+                    </li>
+                ))}
+            </ul>
+        </div>
+    );
+
+
+    return (
+        <div className="min-h-screen bg-gradient-to-br from-slate-900 to-slate-800 text-gray-100 font-sans p-4 sm:p-6 flex flex-col items-center relative">
+            {showApiKeyModal && renderApiKeyModal()}
+            {showSaveModal && renderSavePlaylistModal()}
+            {renderSavedPlaylistsPanel()}
+
+            <button 
+                onClick={() => setShowSavedPlaylistsPanel(true)}
+                className="fixed top-4 left-4 z-30 p-2 bg-slate-700 hover:bg-slate-600 rounded-md shadow-lg text-blue-300 disabled:opacity-50"
+                title="保存済みリストを開く"
+                disabled={!isApiKeySet}
+            >
+                <PanelLeftOpen size={24} />
+            </button>
+
+            <header className="w-full max-w-3xl mb-6 text-center mt-12 sm:mt-0">
                 <div className="flex items-center justify-center mb-2">
                     <ListMusic size={36} className="text-blue-400 mr-3"/>
                     <h1 className="text-3xl sm:text-4xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-cyan-300">
@@ -522,25 +822,36 @@ const App = () => {
                         <section className="bg-slate-800 p-5 rounded-xl shadow-2xl">
                             <div className="flex justify-between items-center mb-4">
                                 <h2 className="text-xl font-semibold text-green-300 flex items-center"><Youtube size={20} className="mr-2"/>生成結果</h2>
-                                {generatedPlaylist.length > 0 && youtubeApiReady && (
-                                    <div className="flex items-center space-x-2">
+                                <div className="flex items-center space-x-2">
+                                    {generatedPlaylist.length > 0 && ( 
                                         <button
-                                            onClick={handlePlayPause}
-                                            title={isPlaying ? "一時停止" : "プレイリスト再生"}
-                                            className="p-2 bg-green-500 hover:bg-green-600 text-white rounded-full shadow-md transition-colors"
+                                            onClick={handleOpenSaveModal}
+                                            title={currentPlaylistId && savedPlaylists.some(p => p.id === currentPlaylistId) ? "プレイリストを更新" : "プレイリストを保存"}
+                                            className="p-2 bg-purple-500 hover:bg-purple-600 text-white rounded-full shadow-md transition-colors"
                                         >
-                                            {isPlaying ? <Pause size={20} /> : <Play size={20} />}
+                                            <Save size={20} />
                                         </button>
-                                        <button
-                                            onClick={handleSkipNext}
-                                            title="次の曲へ"
-                                            disabled={!currentPlayingInfoRef.current || currentPlayingInfoRef.current.index >= generatedPlaylistRef.current.length -1}
-                                            className="p-2 bg-blue-500 hover:bg-blue-600 text-white rounded-full shadow-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                                        >
-                                            <SkipForward size={20} />
-                                        </button>
-                                    </div>
-                                )}
+                                    )}
+                                    {generatedPlaylist.length > 0 && youtubeApiReady && (
+                                        <>
+                                            <button
+                                                onClick={handlePlayPause}
+                                                title={isPlaying ? "一時停止" : "プレイリスト再生"}
+                                                className="p-2 bg-green-500 hover:bg-green-600 text-white rounded-full shadow-md transition-colors"
+                                            >
+                                                {isPlaying ? <Pause size={20} /> : <Play size={20} />}
+                                            </button>
+                                            <button
+                                                onClick={handleSkipNext}
+                                                title="次の曲へ"
+                                                disabled={!currentPlayingInfoRef.current || currentPlayingInfoRef.current.index >= generatedPlaylistRef.current.length -1}
+                                                className="p-2 bg-blue-500 hover:bg-blue-600 text-white rounded-full shadow-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                            >
+                                                <SkipForward size={20} />
+                                            </button>
+                                        </>
+                                    )}
+                                </div>
                             </div>
                             {travelTimeInfo && (
                                 <div className="mb-4 p-3 bg-slate-700 rounded-md">
@@ -556,7 +867,8 @@ const App = () => {
                                 <div>
                                     <div className="mb-3 p-3 bg-slate-700 rounded-md">
                                         <p className="text-sm text-gray-300 flex items-center">
-                                            <ListMusic size={16} className="mr-2 text-green-400"/>生成されたプレイリストの総再生時間:
+                                            <ListMusic size={16} className="mr-2 text-green-400"/>
+                                            {currentPlaylistId && savedPlaylists.find(p => p.id === currentPlaylistId) ? `読み込み済み: ${savedPlaylists.find(p => p.id === currentPlaylistId).name}` : '現在のプレイリスト'}
                                             <span className="font-semibold text-lg ml-2 text-white">{formatDuration(playlistTotalDuration)}</span>
                                         </p>
                                         {travelTimeInfo && playlistTotalDuration < travelTimeInfo.seconds && playlistTotalDuration > 0 && (
@@ -568,26 +880,21 @@ const App = () => {
                                     <ul className="space-y-3 max-h-[40vh] overflow-y-auto pr-2">
                                         {generatedPlaylist.map((video, index) => (
                                             <li 
-                                                key={video.id} 
+                                                key={`${video.id}-${index}`} 
                                                 className={`flex items-start p-3 rounded-lg transition-all duration-200 shadow cursor-pointer
-                                                            ${currentPlayingInfo?.video.id === video.id ? 'bg-blue-600 scale-105' : 'bg-slate-700 hover:bg-slate-600/70'}`}
+                                                            ${currentPlayingInfo?.video.id === video.id && currentPlayingInfo?.index === index ? 'bg-blue-600 scale-105' : 'bg-slate-700 hover:bg-slate-600/70'}`}
                                                 onClick={() => handlePlaySpecificSong(video, index)}
                                             >
                                                 <img src={video.thumbnailUrl} alt={video.title} className="w-20 h-auto rounded-md mr-3 object-cover"/>
                                                 <div className="flex-grow">
-                                                    <a  // Changed back to <a> tag for external link icon if needed in future
-                                                        href={`https://www.youtube.com/watch?v=${video.id}`} // This link might not be directly playable depending on context
-                                                        target="_blank"
-                                                        rel="noopener noreferrer"
-                                                        onClick={(e) => e.stopPropagation()} // Prevent li's onClick when clicking link
-                                                        className={`text-sm font-medium ${currentPlayingInfo?.video.id === video.id ? 'text-white hover:text-blue-200' : 'text-blue-300 hover:text-blue-200'}`}
+                                                    <span                                                       
+                                                        className={`text-sm font-medium ${currentPlayingInfo?.video.id === video.id && currentPlayingInfo?.index === index ? 'text-white' : 'text-blue-300'}`}
                                                     >
                                                         {video.title}
-                                                        {/* <ExternalLink size={12} className="inline ml-1 opacity-70" /> */} {/* Example if ExternalLink were used */}
-                                                    </a>
-                                                    <p className={`text-xs mt-1 ${currentPlayingInfo?.video.id === video.id ? 'text-blue-200' : 'text-gray-400'}`}>{video.channelTitle}</p>
+                                                    </span>
+                                                    <p className={`text-xs mt-1 ${currentPlayingInfo?.video.id === video.id && currentPlayingInfo?.index === index ? 'text-blue-200' : 'text-gray-400'}`}>{video.channelTitle}</p>
                                                 </div>
-                                                <p className={`text-sm ml-2 whitespace-nowrap ${currentPlayingInfo?.video.id === video.id ? 'text-blue-100' : 'text-gray-300'}`}>{formatDuration(video.durationSeconds)}</p>
+                                                <p className={`text-sm ml-2 whitespace-nowrap ${currentPlayingInfo?.video.id === video.id && currentPlayingInfo?.index === index ? 'text-blue-100' : 'text-gray-300'}`}>{formatDuration(video.durationSeconds)}</p>
                                             </li>
                                         ))}
                                     </ul>
@@ -607,7 +914,7 @@ const App = () => {
              <footer className="w-full max-w-3xl mt-8 text-center text-xs text-gray-500">
                 <p>
                     <AlertTriangle size={14} className="inline mr-1" /> 
-                    APIキーはブラウザの外部には送信されませんが、クライアントサイドで処理されるため、開発者ツールなどで閲覧可能です。公共のコンピュータでの使用は推奨しません。
+                    APIキーはブラウザのローカルストレージに保存されます。公共のコンピュータでの使用は推奨しません。
                     APIの利用規約と割り当て制限にご注意ください。
                 </p>
                 <p className="mt-1">
@@ -619,4 +926,3 @@ const App = () => {
 };
 
 export default App;
-
