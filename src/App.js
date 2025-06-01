@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Search, Clock, Youtube, Key, AlertTriangle, ListMusic, Loader2, Timer, Play, Pause, SkipForward } from 'lucide-react'; // Removed ExternalLink
+import './App.css';
 
 // Helper function to parse ISO 8601 duration
 const parseISO8601Duration = (durationString) => {
